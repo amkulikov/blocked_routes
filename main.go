@@ -12,7 +12,7 @@ import (
 
 var (
 	flagSrc          = flag.String("src", "", "Location of blocklist file. It may be URL or filepath")
-	flagMaxNets      = flag.Uint("max", 1 << 32 - 1, "Max subnets in output")
+	flagMaxNets      = flag.Uint("max", uint(^uint32(0)), "Max subnets in output")
 	flagSilent       = flag.Bool("silent", false, "Prevent errors at stderr")
 	flagExcludeNets  = flag.String("exclude", "", "Comma-separated nets in CIDR that must be excluded from result. Private subnets always excluded.")
 	flagOutputFormat = flag.String("output", "default", "Output format: default, cidr, ovpn, push-ovpn")
@@ -42,11 +42,11 @@ func main() {
 	netsTreeRoot := &IPTreeNode{}
 
 	for _, n := range nets {
-		netsTreeRoot.AddSubnet(n, 1)
+		netsTreeRoot.AddSubnet(n)
 	}
 
 	for ip := range ips {
-		netsTreeRoot.AddIP(ip, 1)
+		netsTreeRoot.AddIP(ip)
 	}
 
 	excludedNets := []*net.IPNet{privateNet8, privateNet12, privateNet16}
@@ -81,8 +81,10 @@ func main() {
 		}
 	}
 
-	Dump(len(excludedNets))
+
 	ipNets := GetOptimizedNets(netsTreeRoot, excludedNets, *flagMaxNets)
 
 	OutputNets(ipNets)
+
+	Log("Total nets: %d, excluded: %d", len(ipNets), len(excludedNets))
 }

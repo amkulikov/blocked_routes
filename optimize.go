@@ -12,7 +12,7 @@ type IPTreeNodesList struct {
 func NewIPTreeNodesList(max uint32) *IPTreeNodesList {
 	return &IPTreeNodesList{
 		nodes: make([]*IPTreeNode, 0, max),
-		m: make(map[*IPTreeNode]struct{}),
+		m:     make(map[*IPTreeNode]struct{}),
 	}
 }
 
@@ -69,7 +69,8 @@ func GetOptimizedNets(rootNode *IPTreeNode, excludeNets []*net.IPNet, maxNets ui
 		rootNode.ExcludeSubnet(e)
 	}
 
-	for curNode := l.Pop(); curNode != nil && (l.Size() < maxNets || curNode.ForceExpand); curNode = l.Pop() {
+	curNode := l.Pop()
+	for curNode != nil {
 		if curNode.MaskSize == 32 || curNode.IsLeaf {
 			l.Insert(curNode)
 			break
@@ -82,6 +83,11 @@ func GetOptimizedNets(rootNode *IPTreeNode, excludeNets []*net.IPNet, maxNets ui
 		if curNode.One != nil {
 			l.Insert(curNode.One.Fallthrough())
 		}
+
+		if l.Size() >= maxNets && !curNode.ForceExpand {
+			break
+		}
+		curNode = l.Pop()
 	}
 
 	/*if maxNets > 0 {
@@ -104,10 +110,10 @@ func GetOptimizedNets(rootNode *IPTreeNode, excludeNets []*net.IPNet, maxNets ui
 		}
 	}*/
 
-	 /*for _, n := range l.nodes {
-	 	fmt.Println(n.DumpNode(0))
-	 }
-	 fmt.Println(len(l.nodes))*/
+	/*for _, n := range l.nodes {
+		fmt.Println(n.DumpNode(0))
+	}
+	fmt.Println(len(l.nodes))*/
 
-	 return l.Nets()
+	return l.Nets()
 }

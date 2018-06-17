@@ -30,7 +30,8 @@ type IPTreeNode struct {
 func NewIPTreeNode(ip ipv4range.IPv4, depth uint8, parent *IPTreeNode) *IPTreeNode {
 	ipBuf := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ipBuf, uint32(ip))
-	node := &IPTreeNode{
+	return &IPTreeNode{
+		IsLeaf:            depth == 32,
 		Parent:            parent,
 		MaskSize:          depth,
 		SubtreeCapacity:   1 << (32 - depth),
@@ -38,16 +39,10 @@ func NewIPTreeNode(ip ipv4range.IPv4, depth uint8, parent *IPTreeNode) *IPTreeNo
 		SubtreeLeafsCount: 1,
 		Value:             ipBuf.Mask(net.CIDRMask(int(depth), 32)),
 	}
-
-	if depth == 32 {
-		node.IsLeaf = true
-	}
-
-	return node
 }
 
 // Добавление IP-адреса. success будет false, если добавляемый IP адрес уже был добавлен или входит в ранее добавленную подсеть.
-func (t *IPTreeNode) AddIP(ip ipv4range.IPv4, depth uint8) (success bool) {
+func (t *IPTreeNode) addIP(ip ipv4range.IPv4, depth uint8) (success bool) {
 	var child **IPTreeNode
 	if ip&(1<<(32-depth)) != 0 {
 		child = &t.One
@@ -68,20 +63,26 @@ func (t *IPTreeNode) AddIP(ip ipv4range.IPv4, depth uint8) (success bool) {
 	}
 
 	if depth < 32 {
-		if (*child).AddIP(ip, depth+1) {
+		if (*child).addIP(ip, depth+1) {
 			return true
 		} else {
+			(*child).SubtreeSize--
+			(*child).SubtreeLeafsCount--
 			return false
 		}
 	}
 	return true
 }
 
+func (t *IPTreeNode) AddIP(ip ipv4range.IPv4) {
+	t.addIP(ip, 1)
+}
+
 // Добавление подсети.
 // success будет false, если добавляемая подсеть уже содержится в ранее добавленной.
 // size содержит кол-во фактически добавленных IP-адресов. Например, если при добавлении подсети были поглощёны ранее
 // добавленные IP-адреса, вернется вместимость подсети за вычетом кол-ва поглощённых адресов или вместимости поглощенных посетей
-func (t *IPTreeNode) AddSubnet(s *net.IPNet, depth uint8) (success bool, size uint32, count int64) {
+func (t *IPTreeNode) addSubnet(s *net.IPNet, depth uint8) (success bool, size uint32, count int64) {
 	var child **IPTreeNode
 	ip := binary.BigEndian.Uint32(s.IP)
 	if ip&(1<<(32-depth)) != 0 {
@@ -102,7 +103,7 @@ func (t *IPTreeNode) AddSubnet(s *net.IPNet, depth uint8) (success bool, size ui
 	maskSize, _ := s.Mask.Size()
 
 	if int(depth) <= maskSize {
-		if success, size, count = (*child).AddSubnet(s, depth+1); success {
+		if success, size, count = (*child).addSubnet(s, depth+1); success {
 			t.SubtreeSize += size
 			t.SubtreeLeafsCount = uint32(int64(t.SubtreeLeafsCount) + count)
 			return true, size, count
@@ -118,11 +119,16 @@ func (t *IPTreeNode) AddSubnet(s *net.IPNet, depth uint8) (success bool, size ui
 		t.IsLeaf = true
 		// размер добавленного поддерева считаем как вместимость поддерева за вычетом уже бывших здесь подсетей
 		size = t.SubtreeCapacity - t.SubtreeSize
+		count = int64(1 - t.SubtreeLeafsCount)
 		t.SubtreeSize = t.SubtreeCapacity
 		t.SubtreeLeafsCount = 1
-		return true, size, int64(1 - t.SubtreeLeafsCount)
+		return true, size, count
 	}
 	return true, t.SubtreeCapacity, int64(t.SubtreeLeafsCount)
+}
+
+func (t *IPTreeNode) AddSubnet(s *net.IPNet) {
+	t.addSubnet(s, 1)
 }
 
 // Удаление поддерева
@@ -172,52 +178,45 @@ func (t *IPTreeNode) excludeSubnet(s *net.IPNet, depth uint8) (excludedSize uint
 	ip := binary.BigEndian.Uint32(s.IP)
 	maskedIP := binary.BigEndian.Uint32(s.IP.Mask(net.CIDRMask(int(depth-1), 32)).To4()[:])
 
+	if ip&(1<<(32-depth)) != 0 {
+		child = &t.One
+	} else {
+		child = &t.Zero
+	}
+
 	// Если нода крайняя, а глубина исключаемой подсети ещё не достигнута, необходимо углубляться в подсеть
 	if t.IsLeaf {
-		if t.One == nil {
-			t.One = NewIPTreeNode(ipv4range.IPv4(maskedIP|(1<<(32-depth))), depth, t)
-			t.One.SubtreeSize = t.One.SubtreeCapacity
-		}
+		t.One = NewIPTreeNode(ipv4range.IPv4(maskedIP|(1<<(32-depth))), depth, t)
+		t.One.SubtreeSize = t.One.SubtreeCapacity
 		t.One.IsLeaf = true
-		if t.Zero == nil {
-			t.Zero = NewIPTreeNode(ipv4range.IPv4(maskedIP), depth, t)
-			t.Zero.SubtreeSize = t.Zero.SubtreeCapacity
-		}
+		t.Zero = NewIPTreeNode(ipv4range.IPv4(maskedIP), depth, t)
+		t.Zero.SubtreeSize = t.Zero.SubtreeCapacity
 		t.Zero.IsLeaf = true
 		t.IsLeaf = false
-
-		if ip&(1<<(32-depth)) != 0 {
-			child = &t.One
-		} else {
-			child = &t.Zero
-		}
-	} else {
-		if ip&(1<<(32-depth)) != 0 {
-			child = &t.One
-		} else {
-			child = &t.Zero
-		}
-
-		if *child == nil {
-			// Выходим, так как исключаемая подсеть отсутствует
-			return 0, 0
-		}
+		excludedCount--
+	} else if *child == nil {
+		// Выходим, так как исключаемая подсеть отсутствует
+		return 0, 0
 	}
-	t.ForceExpand = true
 
 	maskSize, _ := s.Mask.Size()
-	if maskSize == int(depth) {
+	if int(depth) < maskSize {
+		t.ForceExpand = true
+		excludedSize, excludedCount = (*child).excludeSubnet(s, depth+1)
+		t.SubtreeSize -= excludedSize
+		t.SubtreeLeafsCount = uint32(int64(t.SubtreeLeafsCount) - excludedCount + 1)
+		if (*child).SubtreeSize == 0 {
+			(*child).DeleteSubtree()
+			*child = nil
+		}
+	} else {
 		excludedSize = (*child).SubtreeSize
-		excludedCount = int64((*child).SubtreeLeafsCount)
+		excludedCount += int64((*child).SubtreeLeafsCount)
 		t.SubtreeSize -= excludedSize
 		t.SubtreeLeafsCount = uint32(int64(t.SubtreeLeafsCount) - excludedCount)
+		(*child).DeleteSubtree()
 		*child = nil
-		return
 	}
-
-	excludedSize, excludedCount = (*child).excludeSubnet(s, depth+1)
-	t.SubtreeSize -= excludedSize
-	t.SubtreeLeafsCount = uint32(int64(t.SubtreeLeafsCount) - excludedCount)
 	return
 }
 
@@ -232,10 +231,10 @@ func (t *IPTreeNode) Network() *net.IPNet {
 // Расчёт штрафа за оставление текущей подсети
 func (t *IPTreeNode) Penalty() uint32 {
 	if t.penalty == 0 {
-		if t.IsLeaf {
+		if t.ForceExpand {
+			t.penalty = ^uint32(0)
+		} else if t.IsLeaf {
 			t.penalty = 1
-		} else if t.ForceExpand {
-			t.penalty = 1<<32 - 1
 		} else {
 			// штраф за оставление подсети = отношение общего кол-ва IP в подсети к кол-ву заблокированных, присутствующих в ней
 			t.penalty = t.SubtreeCapacity / t.SubtreeSize * t.SubtreeLeafsCount
