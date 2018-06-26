@@ -252,7 +252,3 @@ func (t *IPTreeNode) Sibling() (*IPTreeNode) {
 		return t.Parent.One
 	}
 }
-
-func (t *IPTreeNode) SetPenalty(penalty uint32) {
-	t.penalty = penalty
-}
